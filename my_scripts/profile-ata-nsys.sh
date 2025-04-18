@@ -11,6 +11,7 @@ nsys profile \
     --cuda-memory-usage=true \
     --show-output true \
     --stats=true \
+    --cpuctxsw=none \
     --output="reports/$REPORT_NAME" \
     --force-overwrite=true \
     python3 -m tests.profile_all_to_all

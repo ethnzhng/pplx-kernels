@@ -23,7 +23,7 @@ add_timestamp() {
 }
 
 # run desired script on both nodes
-SCRIPT_TO_RUN="./profile-bench-ata.sh"
+SCRIPT_TO_RUN=$1
 mpirun \
     -n 2 \
     -tag-output \

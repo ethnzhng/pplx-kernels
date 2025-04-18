@@ -34,6 +34,7 @@ def bench_all_to_all(
     pgi: ProcessGroupInfo,
     dp_size: int,
     moe: MoEConfig,
+    selected_kernel: str,
 ) -> tuple[tuple[int, ...], torch.Tensor]:
     device = pgi.device
     num_dp = pgi.world_size // dp_size
@@ -140,19 +141,21 @@ def bench_all_to_all(
     a2a_bytes = a2a_tensor.numel() * a2a_tensor.element_size()
     nvshmem_bytes = nvshmem_in.numel() * nvshmem_in.element_size()
 
+    is_local_rank_0 = pgi.local_rank == 0
+
     # Benchmark launcher
-    def run() -> tuple[float, ...]:
-        num_samples = 1
-        events = [
-            [torch.cuda.Event(enable_timing=True) for _ in range(5)]
-            for _ in range(num_samples)
-        ]
+    def run(is_warmup: bool = False) -> tuple[float, ...]:
+        events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
         stream = torch.cuda.current_stream()
 
-        for e0, e1, e2, e3, e4 in events:
-            nvshmem_barrier_all_on_current_stream()
-            e0.record(stream)
+        nvshmem_barrier_all_on_current_stream()
+        events[0].record(stream)
 
+        # Only use NVTX range for non-warmup runs
+        if is_local_rank_0 and not is_warmup:
+            torch.cuda.nvtx.range_push(selected_kernel)
+
+        if selected_kernel == "pplx_dispatch":
             ata.dispatch(
                 out_expert_num_tokens=expert_num_tokens,
                 out_expert_x=expert_x,
@@ -162,8 +165,7 @@ def bench_all_to_all(
                 indices=indices,
                 bound_m=bound_m,
             )
-            e1.record(stream)
-
+        elif selected_kernel == "pplx_combine":
             ata.combine(
                 out_tokens=y,
                 indices=indices,
@@ -171,55 +173,50 @@ def bench_all_to_all(
                 expert_y=expert_y,
                 bound_m=bound_m,
             )
-            e2.record(stream)
-
+        elif selected_kernel == "torch_all_to_all":
             torch.distributed.all_to_all_single(a2a_out_tensor, a2a_tensor)
-            e3.record(stream)
-
+        elif selected_kernel == "nvshmem_all_to_all":
             nvshmem_alltoall(nvshmem_out, nvshmem_in)
-            e4.record(stream)
+
+        if is_local_rank_0 and not is_warmup:
+            torch.cuda.nvtx.range_pop()
+            torch.cuda.synchronize()
+            # torch.distributed.barrier()
+
+        events[1].record(stream)
 
         # Get latency
         stream.synchronize()
-        sum_dispatch_us = 0.0
-        sum_combine_us = 0.0
-        sum_a2a_us = 0.0
-        sum_nvshmem_us = 0.0
-        for e0, e1, e2, e3, e4 in events:
-            sum_dispatch_us += e0.elapsed_time(e1) * 1e3
-            sum_combine_us += e1.elapsed_time(e2) * 1e3
-            sum_a2a_us += e2.elapsed_time(e3) * 1e3
-            sum_nvshmem_us += e3.elapsed_time(e4) * 1e3
-        dispatch_us = sum_dispatch_us / num_samples
-        combine_us = sum_combine_us / num_samples
-        a2a_us = sum_a2a_us / num_samples
-        nvshmem_us = sum_nvshmem_us / num_samples
-        dispatch_gbps = dispatch_bytes / dispatch_us / 1e3
-        combine_gbps = combine_bytes / combine_us / 1e3
-        a2a_gbps = a2a_bytes / a2a_us / 1e3
-        nvshmem_gbps = nvshmem_bytes / nvshmem_us / 1e3
-        return (
-            dispatch_us,
-            combine_us,
-            a2a_us,
-            nvshmem_us,
-            dispatch_gbps,
-            combine_gbps,
-            a2a_gbps,
-            nvshmem_gbps,
-        )
+        elapsed_us = events[0].elapsed_time(events[1]) * 1e3
+
+        if selected_kernel == "pplx_dispatch":
+            bytes_transferred = dispatch_bytes
+        elif selected_kernel == "pplx_combine":
+            bytes_transferred = combine_bytes
+        elif selected_kernel == "torch_all_to_all":
+            bytes_transferred = a2a_bytes
+        elif selected_kernel == "nvshmem_all_to_all":
+            bytes_transferred = nvshmem_bytes
+
+        gbps = bytes_transferred / elapsed_us / 1e3
+
+        return (elapsed_us, gbps)
 
     # Warmup
-    num_warmup = 10
-    with torch.cuda.nvtx.range(f"[Warmup] Exp={moe.num_experts}, Tok={moe.max_num_tokens}, HidDim={moe.hidden_dim}"):
+    num_warmup = 20
+    with torch.cuda.nvtx.range(
+        f"[Warmup] Exp={moe.num_experts}, Tok={moe.max_num_tokens}, HidDim={moe.hidden_dim}"
+    ):
         for _ in range(num_warmup):
-            run()
+            run(is_warmup=True)
 
     # Benchmark
     torch.distributed.barrier()
     num_repeat = 1
-    with torch.cuda.nvtx.range(f"[Benchmark] Exp={moe.num_experts}, Tok={moe.max_num_tokens}, HidDim={moe.hidden_dim}"):
-        result = torch.tensor([run() for _ in range(num_repeat)])
+    with torch.cuda.nvtx.range(
+        f"[Benchmark] Exp={moe.num_experts}, Tok={moe.max_num_tokens}, HidDim={moe.hidden_dim}"
+    ):
+        result = torch.tensor([run(is_warmup=False) for _ in range(num_repeat)])
 
     # Cleanup
     ata.destroy()
@@ -230,11 +227,12 @@ def bench_all_to_all(
     )
 
 
-def _worker_bench_all_to_all(
+def _worker_profile_all_to_all(
     pgi: ProcessGroupInfo,
     dp_size: int,
     in_dtype_str: str,
     out_dtype_str: str,
+    selected_kernel: str,
 ) -> None:
     uid = nvshmem_get_unique_id() if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
     torch.distributed.broadcast(uid, src=0)
@@ -267,18 +265,9 @@ def _worker_bench_all_to_all(
         "E/tok",
         "tok",
         "dim",
-        "Dispatch_lat",
-        "Dispatch_bw",
-        "Dispatch_bytes",
-        "Combine_lat",
-        "Combine_bw",
-        "Combine_bytes",
-        "Torch_lat",
-        "Torch_bw",
-        "Torch_bytes",
-        "NVSHMEM_lat",
-        "NVSHMEM_bw",
-        "NVSHMEM_bytes",
+        f"{selected_kernel.capitalize()}_lat",
+        f"{selected_kernel.capitalize()}_bw",
+        f"{selected_kernel.capitalize()}_bytes",
     ]
 
     outpath = (
@@ -302,26 +291,25 @@ def _worker_bench_all_to_all(
     for config in configs:
         if pgi.world_size > config.num_experts:
             continue
-        meta, result = bench_all_to_all(pgi, dp_size, config)
-        dispatch_bytes, combine_bytes, a2a_bytes, nvshmem_bytes = meta
+        meta, result = bench_all_to_all(pgi, dp_size, config, selected_kernel)
+        bytes_transferred = meta[
+            [
+                "pplx_dispatch",
+                "pplx_combine",
+                "torch_all_to_all",
+                "nvshmem_all_to_all",
+            ].index(selected_kernel)
+        ]
         if pgi.rank == 0:
             row: dict[str, str] = {
                 "E": f"{config.num_experts}",
                 "E/tok": f"{config.experts_per_token}",
                 "tok": f"{config.max_num_tokens}",
                 "dim": f"{config.hidden_dim}",
-                "Dispatch_lat": f"{result[:, 0].mean():4.1f}μs ± {result[:, 0].std():4.1f}μs",
-                "Dispatch_bw": f"{result[:, 4].mean():2.3f}GB/s",
-                "Dispatch_bytes": f"{dispatch_bytes}",
-                "Combine_lat": f"{result[:, 1].mean():4.1f}μs ± {result[:, 1].std():4.1f}μs",
-                "Combine_bw": f"{result[:, 5].mean():2.3f}GB/s",
-                "Combine_bytes": f"{combine_bytes}",
-                "Torch_lat": f"{result[:, 2].mean():4.1f}μs ± {result[:, 2].std():4.1f}μs",
-                "Torch_bw": f"{result[:, 6].mean():2.3f}GB/s",
-                "Torch_bytes": f"{a2a_bytes}",
-                "NVSHMEM_lat": f"{result[:, 3].mean():4.1f}μs ± {result[:, 3].std():4.1f}μs",
-                "NVSHMEM_bw": f"{result[:, 7].mean():2.3f}GB/s",
-                "NVSHMEM_bytes": f"{nvshmem_bytes}",
+                f"{selected_kernel.capitalize()}_lat": f"{result[:, 0].mean():4.1f}μs"
+                + (f" ± {result[:, 0].std():4.1f}μs" if len(result) > 1 else ""),
+                f"{selected_kernel.capitalize()}_bw": f"{result[:, 1].mean():2.3f}GB/s",
+                f"{selected_kernel.capitalize()}_bytes": f"{bytes_transferred}",
             }
             assert list(row.keys()) == header
             line = "\t".join(row[h] for h in header)
@@ -350,17 +338,35 @@ def main() -> None:
         choices=["bfloat16", "float16"],
         default="bfloat16",
     )
+    parser.add_argument(
+        "--kernel",
+        choices=[
+            "pplx_dispatch",
+            "pplx_combine",
+            "torch_all_to_all",
+            "nvshmem_all_to_all",
+        ],
+        required=True,
+    )
     args = parser.parse_args()
     dp_size = int(args.dp_size)
     in_dtype = str(args.in_dtype)
     out_dtype = str(args.out_dtype)
+    selected_kernel = str(args.kernel)
 
     if "MASTER_ADDR" in os.environ:
-        parallel_launch_from_env(_worker_bench_all_to_all, dp_size, in_dtype, out_dtype)
+        parallel_launch_from_env(
+            _worker_profile_all_to_all, dp_size, in_dtype, out_dtype, selected_kernel
+        )
     else:
         world_size = torch.cuda.device_count()
         parallel_launch(
-            world_size, _worker_bench_all_to_all, dp_size, in_dtype, out_dtype
+            world_size,
+            _worker_profile_all_to_all,
+            dp_size,
+            in_dtype,
+            out_dtype,
+            selected_kernel,
         )
 
 
