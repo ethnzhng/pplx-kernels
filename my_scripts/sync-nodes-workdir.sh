@@ -13,7 +13,7 @@ USER="ubuntu"
 
 WORKDIR="$(realpath ..)/"
 echo "Syncing $WORKDIR from $SOURCE_HOST to $TARGET_HOST..."
-# chmod +x *.sh
+chmod +x *.sh
 rsync \
     -a \
     --progress \
