@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-REPORT_NAME=${TIME_ID}_pplx_ata_node${NODE_RANK:-_single}
+REPORT_NAME=${TIME_ID}_pplx_py_ata_node${NODE_RANK:-_single}
 
 cd ..
 mkdir -p reports

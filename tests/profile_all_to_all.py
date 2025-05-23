@@ -212,7 +212,7 @@ def bench_all_to_all(
 
     # Benchmark
     torch.distributed.barrier()
-    num_repeat = 1
+    num_repeat = 10
     with torch.cuda.nvtx.range(
         f"[Benchmark] Exp={moe.num_experts}, Tok={moe.max_num_tokens}, HidDim={moe.hidden_dim}"
     ):

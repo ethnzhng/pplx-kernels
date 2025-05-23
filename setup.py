@@ -47,6 +47,7 @@ class CMakeBuild(build_ext):
                 "-DCMAKE_PREFIX_PATH=" + _get_torch_cmake_prefix_path(),
                 "-DTORCH_CUDA_ARCH_LIST=" + os.environ["TORCH_CUDA_ARCH_LIST"],
                 "-WITH_TESTS=OFF",
+                "-DCUDA_NVCC_FLAGS=-lineinfo",
             ]
         )
         subprocess.check_call(["ninja"], cwd=str(build_dir))

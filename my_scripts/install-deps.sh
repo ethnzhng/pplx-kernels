@@ -11,5 +11,5 @@ export CUDA_HOME=/usr/local/cuda-12.2
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 
-source ./install-gdrcopy.sh
-source ./install-nvshmem.sh
+./install-gdrcopy.sh
+./install-nvshmem.sh

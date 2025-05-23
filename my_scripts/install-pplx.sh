@@ -12,3 +12,5 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 cd ..
 TORCH_CUDA_ARCH_LIST=9.0a+PTX python3 setup.py bdist_wheel
 pip install dist/*.whl
+
+# pip install --force-reinstall --no-deps dist/*.whl

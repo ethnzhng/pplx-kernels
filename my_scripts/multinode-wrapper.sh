@@ -23,6 +23,8 @@ export MASTER_PORT="29501"
 export NVSHMEM_REMOTE_TRANSPORT="libfabric"
 export NVSHMEM_LIBFABRIC_PROVIDER="efa"
 
+# export NCCL_DEBUG=INFO
+
 # explicitly configure libfabric just in case
 export FI_PROVIDER="efa"
 export FI_EFA_USE_DEVICE_RDMA="1"

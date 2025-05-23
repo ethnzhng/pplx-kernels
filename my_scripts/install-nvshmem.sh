@@ -27,8 +27,8 @@ cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=$NVSHMEM_DIR \
     -DMPI_HOME=$MPI_HOME \
     -DNVSHMEM_SHMEM_SUPPORT=OFF \
     -DNVSHMEM_UCX_SUPPORT=OFF \
-    -DNVSHMEM_USE_NCCL=OFF \
-    -DNVSHMEM_IBGDA_SUPPORT=OFF \
+    -DNVSHMEM_USE_NCCL=ON \
+    -DNVSHMEM_IBGDA_SUPPORT=ON \
     -DNVSHMEM_IBRC_SUPPORT=OFF \
     -DNVSHMEM_PMIX_SUPPORT=OFF \
     -DNVSHMEM_TIMEOUT_DEVICE_POLLING=OFF \
@@ -40,4 +40,5 @@ cd build
 make -j$(nproc)
 sudo make install
 
+export PATH="${NVSHMEM_DIR}/bin:$PATH"
 nvshmem-info -a # Should display details of nvshmem
